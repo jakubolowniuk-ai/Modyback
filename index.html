@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Przycinanie pasów — etap 1</title>
+<style>
+  :root {
+    --bg: #f4f4f5;
+    --card: #ffffff;
+    --text: #18181b;
+    --muted: #71717a;
+    --accent: #2563eb;
+    --border: #e4e4e7;
+    --error: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #18181b;
+      --card: #27272a;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --accent: #60a5fa;
+      --border: #3f3f46;
+      --error: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, sans-serif;
+    font-size: 16px;
+  }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  button, .file-label {
+    display: block;
+    width: 100%;
+    padding: 14px;
+    margin-top: 8px;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 16px;
+    text-align: center;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.4; cursor: default; }
+  input[type="file"] { display: none; }
+  .info { line-height: 1.6; }
+  .info b { font-variant-numeric: tabular-nums; }
+  .error { color: var(--error); }
+  .previews {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .previews figure { margin: 0; }
+  .previews figcaption { font-size: 14px; color: var(--muted); margin-bottom: 4px; }
+  .previews img {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: repeating-conic-gradient(#888 0% 25%, #aaa 0% 50%) 50% / 16px 16px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Przycinanie pasów — etap 1</h1>
+
+<div class="card">
+  <label class="file-label" for="fileInput">Wybierz zdjęcie</label>
+  <input type="file" id="fileInput" accept="image/png, image/jpeg">
+  <button id="rerollBtn" disabled>Wylosuj paski ponownie</button>
+  <button id="downloadBtn" disabled>Pobierz wynik</button>
+</div>
+
+<div class="card info" id="info">Wybierz zrzut ekranu, żeby zacząć.</div>
+
+<div class="previews">
+  <figure>
+    <figcaption>Oryginał</figcaption>
+    <img id="originalImg" alt="">
+  </figure>
+  <figure>
+    <figcaption>Wynik</figcaption>
+    <img id="resultImg" alt="">
+  </figure>
+</div>
+
+<script>
+// ===== USTAWIENIA =====
+const DARK_THRESHOLD = 25;     // piksel uznajemy za czarny, jeśli każdy kanał (R, G, B) ≤ 25 na 255
+const ROW_BLACK_RATIO = 0.995; // wiersz jest "czarny", jeśli ≥ 99,5% pikseli jest czarnych
+const BAR_MIN = 6;             // najmniejszy losowy pasek (px)
+const BAR_MAX = 30;            // największy losowy pasek (px)
+const JPG_QUALITY = 0.95;      // jakość zapisu JPG (0–1)
+
+// ===== ELEMENTY STRONY =====
+const fileInput = document.getElementById('fileInput');
+const rerollBtn = document.getElementById('rerollBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const info = document.getElementById('info');
+const originalImg = document.getElementById('originalImg');
+const resultImg = document.getElementById('resultImg');
+
+// ===== STAN APLIKACJI =====
+let sourceCanvas = null;  // płótno z oryginalnym zdjęciem
+let detected = null;      // wykryte pasy: { top, bottom }
+let current = null;       // aktualny wynik: { blob, url, randTop, randBottom }
+let originalFile = null;  // wybrany plik (potrzebny do nazwy i formatu)
+
+// ===== 1. WCZYTANIE ZDJĘCIA =====
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  originalFile = file;
+
+  try {
+    const img = await loadImage(file);
+    originalImg.src = img.src;
+
+    // Rysujemy zdjęcie na płótnie, żeby móc czytać jego piksele
+    sourceCanvas = document.createElement('canvas');
+    sourceCanvas.width = img.naturalWidth;
+    sourceCanvas.height = img.naturalHeight;
+    const ctx = sourceCanvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+
+    // ===== 2. WYKRYCIE PASÓW =====
+    detected = detectBars(ctx, sourceCanvas.width, sourceCanvas.height);
+
+    if (detected.top + detected.bottom >= sourceCanvas.height) {
+      showError('Całe zdjęcie wygląda na czarne — nie ma czego zostawić.');
+      return;
+    }
+
+    await makeResult();
+  } catch (err) {
+    showError('Nie udało się wczytać zdjęcia: ' + err.message);
+  }
+});
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('nieobsługiwany lub uszkodzony plik'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+// Liczy, ile wierszy od góry i od dołu jest czarnych
+function detectBars(ctx, width, height) {
+  const data = ctx.getImageData(0, 0, width, height).data;
+
+  function isRowBlack(y) {
+    let dark = 0;
+    const rowStart = y * width * 4; // każdy piksel to 4 liczby: R, G, B, A
+    for (let x = 0; x < width; x++) {
+      const i = rowStart + x * 4;
+      if (data[i] <= DARK_THRESHOLD &&
+          data[i + 1] <= DARK_THRESHOLD &&
+          data[i + 2] <= DARK_THRESHOLD) {
+        dark++;
+      }
+    }
+    return dark / width >= ROW_BLACK_RATIO;
+  }
+
+  let top = 0;
+  while (top < height && isRowBlack(top)) top++;
+
+  let bottom = 0;
+  while (bottom < height - top && isRowBlack(height - 1 - bottom)) bottom++;
+
+  return { top, bottom };
+}
+
+// ===== 3. PRZYCIĘCIE + LOSOWY PASEK =====
+async function makeResult() {
+  const width = sourceCanvas.width;
+  const contentHeight = sourceCanvas.height - detected.top - detected.bottom;
+
+  const randTop = randomInt(BAR_MIN, BAR_MAX);
+  const randBottom = randomInt(BAR_MIN, BAR_MAX);
+
+  const out = document.createElement('canvas');
+  out.width = width;
+  out.height = randTop + contentHeight + randBottom;
+  const ctx = out.getContext('2d');
+
+  // Czarne tło = przyszłe paski
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, out.width, out.height);
+
+  // Wklejamy środek oryginału (bez starych pasów) przesunięty o randTop
+  ctx.drawImage(
+    sourceCanvas,
+    0, detected.top, width, contentHeight,  // skąd: fragment oryginału
+    0, randTop, width, contentHeight        // dokąd: miejsce w wyniku
+  );
+
+  // ===== 4. ZAPIS DO PLIKU W PAMIĘCI =====
+  const type = originalFile.type === 'image/png' ? 'image/png' : 'image/jpeg';
+  const blob = await new Promise(res => out.toBlob(res, type, JPG_QUALITY));
+
+  if (current) URL.revokeObjectURL(current.url); // zwalniamy poprzedni wynik
+  current = { blob, url: URL.createObjectURL(blob), randTop, randBottom };
+
+  resultImg.src = current.url;
+  rerollBtn.disabled = false;
+  downloadBtn.disabled = false;
+
+  info.innerHTML =
+    `Oryginał: <b>${sourceCanvas.width} × ${sourceCanvas.height}</b> px<br>` +
+    `Wykryty pas u góry: <b>${detected.top}</b> px, u dołu: <b>${detected.bottom}</b> px<br>` +
+    `Nowy pasek u góry: <b>${randTop}</b> px, u dołu: <b>${randBottom}</b> px<br>` +
+    `Wynik: <b>${out.width} × ${out.height}</b> px`;
+}
+
+function randomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function showError(msg) {
+  info.innerHTML = `<span class="error">${msg}</span>`;
+  rerollBtn.disabled = true;
+  downloadBtn.disabled = true;
+}
+
+// ===== PRZYCISKI =====
+rerollBtn.addEventListener('click', makeResult);
+
+downloadBtn.addEventListener('click', () => {
+  const a = document.createElement('a');
+  a.href = current.url;
+  a.download = originalFile.name; // ta sama nazwa co oryginał
+  a.click();
+});
+</script>
+</body>
+</html>
