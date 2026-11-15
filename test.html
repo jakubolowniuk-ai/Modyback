@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test wycinania — etap 2</title>
+<style>
+  :root {
+    --bg: #f4f4f5;
+    --card: #ffffff;
+    --text: #18181b;
+    --muted: #71717a;
+    --accent: #2563eb;
+    --border: #e4e4e7;
+    --error: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #18181b;
+      --card: #27272a;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --accent: #60a5fa;
+      --border: #3f3f46;
+      --error: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, sans-serif;
+    font-size: 16px;
+  }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  button, .file-label {
+    display: block;
+    width: 100%;
+    padding: 14px;
+    margin-top: 8px;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 16px;
+    text-align: center;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.4; cursor: default; }
+  input[type="file"] { display: none; }
+  .color-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 12px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .color-row input { width: 64px; height: 40px; border: none; background: none; }
+  .info { line-height: 1.6; }
+  .error { color: var(--error); }
+  .result-card h2 { font-size: 15px; margin: 0 0 4px; word-break: break-all; }
+  .result-card .meta { color: var(--muted); font-size: 14px; margin-bottom: 8px; }
+  .pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .pair figcaption { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  .pair figure { margin: 0; }
+  .pair canvas {
+    width: 100%;
+    height: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    display: block;
+  }
+</style>
+</head>
+<body>
+
+<h1>Test wycinania produktu — etap 2</h1>
+
+<div class="card">
+  <label class="file-label" for="fileInput">Wybierz do 10 zdjęć</label>
+  <input type="file" id="fileInput" accept="image/png, image/jpeg" multiple>
+  <label class="color-row">Kolor tła testowego
+    <input type="color" id="bgColor" value="#00ff00">
+  </label>
+  <button id="startBtn" disabled>Start</button>
+</div>
+
+<div class="card info" id="status">Wybierz zdjęcia, żeby zacząć.</div>
+
+<div id="results"></div>
+
+<script type="module">
+// Biblioteka z przypiętą wersją (nie "latest") — patrz zasady bezpieczeństwa w projekcie
+import { removeBackground } from 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.5.5/+esm';
+
+// ===== USTAWIENIA =====
+const MAX_FILES = 10;          // tyle zdjęć na test
+const DARK_THRESHOLD = 25;     // piksel czarny, jeśli każdy kanał ≤ 25 na 255
+const ROW_BLACK_RATIO = 0.7;   // wiersz należy do pasa, jeśli ≥ 70% pikseli jest czarnych
+
+// ===== ELEMENTY STRONY =====
+const fileInput = document.getElementById('fileInput');
+const startBtn = document.getElementById('startBtn');
+const bgColor = document.getElementById('bgColor');
+const statusBox = document.getElementById('status');
+const resultsBox = document.getElementById('results');
+
+let files = [];
+
+fileInput.addEventListener('change', () => {
+  files = Array.from(fileInput.files).slice(0, MAX_FILES);
+  startBtn.disabled = files.length === 0;
+  setStatus(files.length
+    ? `Wybrano zdjęć: <b>${files.length}</b>. Kliknij Start.`
+    : 'Wybierz zdjęcia, żeby zacząć.');
+});
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  fileInput.disabled = true;
+  resultsBox.innerHTML = '';
+  const times = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const label = `Zdjęcie ${i + 1} z ${files.length}`;
+    try {
+      const seconds = await processFile(files[i], label);
+      times.push(seconds);
+    } catch (err) {
+      console.error(err);
+      addError(files[i].name, err.message);
+    }
+  }
+
+  // Średnia bez pierwszego zdjęcia (pierwsze liczy też pobieranie modelu)
+  const rest = times.slice(1);
+  const avg = rest.length ? rest.reduce((a, b) => a + b, 0) / rest.length : null;
+  setStatus(
+    `Gotowe. Przetworzono: <b>${times.length}</b> z ${files.length}.` +
+    (avg !== null
+      ? `<br>Średni czas na zdjęcie (bez pierwszego): <b>${avg.toFixed(1)} s</b>` +
+        `<br>Szacunek dla 200 zdjęć: <b>${Math.round(avg * 200 / 60)} min</b>`
+      : '')
+  );
+  startBtn.disabled = false;
+  fileInput.disabled = false;
+});
+
+// ===== PRZETWARZANIE JEDNEGO ZDJĘCIA =====
+async function processFile(file, label) {
+  setStatus(`${label}: wczytywanie…`);
+  const img = await loadImage(file);
+
+  const src = document.createElement('canvas');
+  src.width = img.naturalWidth;
+  src.height = img.naturalHeight;
+  const sctx = src.getContext('2d', { willReadFrequently: true });
+  sctx.drawImage(img, 0, 0);
+
+  // 1. Przycięcie czarnych pasów (jak w etapie 1)
+  const { top, bottom } = detectBars(sctx, src.width, src.height);
+  const contentH = src.height - top - bottom;
+  if (contentH <= 0) throw new Error('Całe zdjęcie wygląda na czarne.');
+
+  const crop = document.createElement('canvas');
+  crop.width = src.width;
+  crop.height = contentH;
+  crop.getContext('2d').drawImage(src, 0, top, src.width, contentH, 0, 0, src.width, contentH);
+  const cropBlob = await canvasToBlob(crop, 'image/png');
+
+  // 2. Wycięcie produktu modelem AI (zwraca PNG z przezroczystym tłem)
+  const t0 = performance.now();
+  const cutBlob = await removeBackground(cropBlob, {
+    progress: (key, current, total) => {
+      const what = key.startsWith('fetch') ? 'pobieranie modelu (tylko za pierwszym razem)' : 'przetwarzanie';
+      const pct = total ? ` ${Math.round(current / total * 100)}%` : '';
+      setStatus(`${label}: ${what}${pct}`);
+    }
+  });
+  const seconds = (performance.now() - t0) / 1000;
+
+  // 3. Złożenie wyniku na jednolitym tle testowym
+  const cutImg = await loadImage(cutBlob);
+  const out = document.createElement('canvas');
+  out.width = crop.width;
+  out.height = crop.height;
+  const octx = out.getContext('2d');
+  octx.fillStyle = bgColor.value;
+  octx.fillRect(0, 0, out.width, out.height);
+  octx.drawImage(cutImg, 0, 0, out.width, out.height);
+
+  addResult(file.name, seconds, top, bottom, crop, out);
+  return seconds;
+}
+
+// ===== FUNKCJE POMOCNICZE =====
+function detectBars(ctx, width, height) {
+  const data = ctx.getImageData(0, 0, width, height).data;
+
+  function isRowBlack(y) {
+    let dark = 0;
+    const rowStart = y * width * 4;
+    for (let x = 0; x < width; x++) {
+      const i = rowStart + x * 4;
+      if (data[i] <= DARK_THRESHOLD &&
+          data[i + 1] <= DARK_THRESHOLD &&
+          data[i + 2] <= DARK_THRESHOLD) {
+        dark++;
+      }
+    }
+    return dark / width >= ROW_BLACK_RATIO;
+  }
+
+  let top = 0;
+  while (top < height && isRowBlack(top)) top++;
+
+  let bottom = 0;
+  while (bottom < height - top && isRowBlack(height - 1 - bottom)) bottom++;
+
+  return { top, bottom };
+}
+
+function loadImage(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('nie udało się wczytać obrazu')); };
+    img.src = url;
+  });
+}
+
+function canvasToBlob(canvas, type) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(b => b ? resolve(b) : reject(new Error('nie udało się zapisać obrazu')), type);
+  });
+}
+
+function setStatus(html) {
+  statusBox.innerHTML = html;
+}
+
+function addResult(name, seconds, top, bottom, cropCanvas, outCanvas) {
+  const card = document.createElement('div');
+  card.className = 'card result-card';
+  card.innerHTML =
+    `<h2></h2>` +
+    `<div class="meta">Czas wycinania: <b>${seconds.toFixed(1)} s</b> · pasy: ${top} / ${bottom} px</div>` +
+    `<div class="pair">` +
+    `<figure><figcaption>Po przycięciu</figcaption></figure>` +
+    `<figure><figcaption>Po wycięciu</figcaption></figure>` +
+    `</div>`;
+  card.querySelector('h2').textContent = name;
+  const figs = card.querySelectorAll('figure');
+  figs[0].appendChild(cropCanvas);
+  figs[1].appendChild(outCanvas);
+  resultsBox.appendChild(card);
+}
+
+function addError(name, message) {
+  const card = document.createElement('div');
+  card.className = 'card result-card';
+  card.innerHTML = `<h2></h2><div class="error"></div>`;
+  card.querySelector('h2').textContent = name;
+  card.querySelector('.error').textContent = 'Błąd: ' + message;
+  resultsBox.appendChild(card);
+}
+</script>
+</body>
+  </html>
