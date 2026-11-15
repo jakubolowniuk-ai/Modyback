@@ -60,6 +60,23 @@
   .info { line-height: 1.6; }
   .info b { font-variant-numeric: tabular-nums; }
   .error { color: var(--error); }
+  .manual {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .manual label { font-size: 14px; color: var(--muted); }
+  .manual input {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    padding: 12px;
+    font-size: 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+  }
   .previews {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -88,6 +105,18 @@
 
 <div class="card info" id="info">Wybierz zrzut ekranu, żeby zacząć.</div>
 
+<div class="card">
+  <div class="manual">
+    <label>Pas u góry (px)
+      <input type="number" id="topInput" min="0" inputmode="numeric" disabled>
+    </label>
+    <label>Pas u dołu (px)
+      <input type="number" id="bottomInput" min="0" inputmode="numeric" disabled>
+    </label>
+  </div>
+  <button id="applyBtn" disabled>Zastosuj ręczne wartości</button>
+</div>
+
 <div class="previews">
   <figure>
     <figcaption>Oryginał</figcaption>
@@ -102,7 +131,8 @@
 <script>
 // ===== USTAWIENIA =====
 const DARK_THRESHOLD = 25;     // piksel uznajemy za czarny, jeśli każdy kanał (R, G, B) ≤ 25 na 255
-const ROW_BLACK_RATIO = 0.995; // wiersz jest "czarny", jeśli ≥ 99,5% pikseli jest czarnych
+const ROW_BLACK_RATIO = 0.7;   // wiersz należy do pasa, jeśli ≥ 70% pikseli jest czarnych
+                               // (dzięki temu pasek stanu i przyciski nawigacji też są uznane za pas)
 const BAR_MIN = 6;             // najmniejszy losowy pasek (px)
 const BAR_MAX = 30;            // największy losowy pasek (px)
 const JPG_QUALITY = 0.95;      // jakość zapisu JPG (0–1)
@@ -114,6 +144,9 @@ const downloadBtn = document.getElementById('downloadBtn');
 const info = document.getElementById('info');
 const originalImg = document.getElementById('originalImg');
 const resultImg = document.getElementById('resultImg');
+const topInput = document.getElementById('topInput');
+const bottomInput = document.getElementById('bottomInput');
+const applyBtn = document.getElementById('applyBtn');
 
 // ===== STAN APLIKACJI =====
 let sourceCanvas = null;  // płótno z oryginalnym zdjęciem
@@ -145,6 +178,11 @@ fileInput.addEventListener('change', async () => {
       showError('Całe zdjęcie wygląda na czarne — nie ma czego zostawić.');
       return;
     }
+
+    // Wpisujemy wykryte wartości do pól ręcznej korekty
+    topInput.value = detected.top;
+    bottomInput.value = detected.bottom;
+    topInput.disabled = bottomInput.disabled = applyBtn.disabled = false;
 
     await makeResult();
   } catch (err) {
@@ -243,6 +281,23 @@ function showError(msg) {
 // ===== PRZYCISKI =====
 rerollBtn.addEventListener('click', makeResult);
 
+applyBtn.addEventListener('click', async () => {
+  const top = parseInt(topInput.value, 10);
+  const bottom = parseInt(bottomInput.value, 10);
+
+  if (isNaN(top) || isNaN(bottom) || top < 0 || bottom < 0) {
+    showError('Wpisz liczby całkowite od 0 wzwyż.');
+    return;
+  }
+  if (top + bottom >= sourceCanvas.height) {
+    showError('Pasy są grubsze niż całe zdjęcie.');
+    return;
+  }
+
+  detected = { top, bottom };
+  await makeResult();
+});
+
 downloadBtn.addEventListener('click', () => {
   const a = document.createElement('a');
   a.href = current.url;
@@ -251,4 +306,4 @@ downloadBtn.addEventListener('click', () => {
 });
 </script>
 </body>
-</html>
+  </html>
