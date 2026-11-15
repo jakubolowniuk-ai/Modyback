@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Test wycinania — etap 2b</title>
+<title>Test wycinania — etap 2c</title>
 <style>
   :root {
     --bg: #f4f4f5;
@@ -79,7 +79,7 @@
   .info { line-height: 1.6; }
   .error { color: var(--error); }
   .result-card h2 { font-size: 15px; margin: 0 0 4px; word-break: break-all; }
-  .result-card .meta { color: var(--muted); font-size: 14px; margin-bottom: 8px; }
+  .result-card .meta { color: var(--muted); font-size: 14px; margin-bottom: 8px; line-height: 1.5; }
   .slider-row { margin: 8px 0 12px; font-size: 14px; color: var(--muted); }
   .slider-row input { width: 100%; margin-top: 6px; }
   .pair {
@@ -100,7 +100,7 @@
 </head>
 <body>
 
-<h1>Test wycinania produktu — etap 2b</h1>
+<h1>Test wycinania produktu — etap 2c</h1>
 
 <div class="card">
   <label class="file-label" for="fileInput">Wybierz do 10 zdjęć</label>
@@ -108,15 +108,15 @@
 
   <label class="row">Model
     <select id="modelSelect">
-      <option value="isnet_quint8">najszybszy (quint8)</option>
-      <option value="isnet_fp16" selected>domyślny (fp16)</option>
-      <option value="isnet">najdokładniejszy (pełny)</option>
+      <option value="isnet_quint8">quint8 (szybki na CPU)</option>
+      <option value="isnet_fp16" selected>fp16 (domyślny)</option>
+      <option value="isnet">pełny (najdokładniejszy)</option>
     </select>
   </label>
   <label class="row">Procesor
     <select id="deviceSelect">
       <option value="cpu" selected>CPU (pewny)</option>
-      <option value="gpu">GPU / WebGPU (jeśli telefon obsługuje)</option>
+      <option value="gpu">GPU / WebGPU (eksperyment)</option>
     </select>
   </label>
   <label class="row">Kolor tła testowego
@@ -131,6 +131,15 @@
 <div id="results"></div>
 
 <script type="module">
+// ===== ŁATKA DLA WEBGPU =====
+// Starsza wersja silnika w bibliotece woła funkcję requestAdapterInfo(), którą nowe Chrome usunęły.
+// Podstawiamy ją z powrotem, korzystając z nowej właściwości "info".
+if (typeof GPUAdapter !== 'undefined' && !GPUAdapter.prototype.requestAdapterInfo) {
+  GPUAdapter.prototype.requestAdapterInfo = function () {
+    return Promise.resolve(this.info);
+  };
+}
+
 // ===== USTAWIENIA =====
 const LIB_URL = 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.5.5/+esm'; // przypięta wersja
 const MAX_FILES = 10;          // tyle zdjęć na test
@@ -254,36 +263,48 @@ async function processFile(file, label, model, device) {
   const cut = tctx.getImageData(0, 0, w, h);
 
   const alpha = new Uint8ClampedArray(w * h);
-  for (let i = 0; i < alpha.length; i++) alpha[i] = cut.data[i * 4 + 3];
+  let clear = 0, mid = 0, solid = 0;
+  for (let i = 0; i < alpha.length; i++) {
+    const a = cut.data[i * 4 + 3];
+    alpha[i] = a;
+    if (a < 26) clear++;          // praktycznie przezroczyste = tło
+    else if (a >= 230) solid++;   // praktycznie pełne = produkt
+    else mid++;                   // pośrednie = niepewność modelu (lub miękka krawędź)
+  }
+  const pct = n => Math.round(n / alpha.length * 100);
+  const stats = `tło ${pct(clear)}% · produkt ${pct(solid)}% · półprzezroczyste ${pct(mid)}%`;
 
   const out = document.createElement('canvas');
   out.width = w;
   out.height = h;
 
-  const st = { w, h, cut, alpha, tmp, tctx, out, slider: null, cacheR: -1, cacheA: null };
-  addResult(file.name, seconds, top, bottom, model, device, crop, st);
+  const st = { w, h, cut, alpha, tmp, tctx, out, slider: null };
+  addResult(file.name, seconds, top, bottom, model, device, stats, crop, st);
   render(st);
   return seconds;
 }
 
-// ===== SKŁADANIE WYNIKU (z czyszczeniem smug) =====
-function render(st) {
-  const r = Number(st.slider.value);
-
-  let a;
-  if (r === 0) {
-    a = st.alpha;
-  } else {
-    if (st.cacheR !== r) {
-      // otwarcie morfologiczne = erozja (zmniejszenie maski) + dylatacja (powiększenie z powrotem)
-      st.cacheA = morph(morph(st.alpha, st.w, st.h, r, false), st.w, st.h, r, true);
-      st.cacheR = r;
-    }
-    a = st.cacheA;
+// ===== SKŁADANIE WYNIKU (z utwardzaniem półprzezroczystości) =====
+// Tablica LUT: dla każdej wartości przezroczystości 0–255 mówi, jaka ma być po poprawce.
+// s = 0: bez zmian. Im większe s, tym mocniej słabe wartości są zerowane, a średnie podbijane do pełnych.
+function makeLut(s) {
+  const lut = new Uint8ClampedArray(256);
+  const lo = s * 6;
+  const hi = 255 - s * 20;
+  for (let a = 0; a < 256; a++) {
+    if (s === 0) lut[a] = a;
+    else if (a <= lo) lut[a] = 0;
+    else if (a >= hi) lut[a] = 255;
+    else lut[a] = Math.round((a - lo) * 255 / (hi - lo));
   }
+  return lut;
+}
+
+function render(st) {
+  const lut = makeLut(Number(st.slider.value));
 
   const data = new Uint8ClampedArray(st.cut.data); // kopia pikseli produktu
-  for (let i = 0; i < a.length; i++) data[i * 4 + 3] = a[i];
+  for (let i = 0; i < st.alpha.length; i++) data[i * 4 + 3] = lut[st.alpha[i]];
   st.tctx.putImageData(new ImageData(data, st.w, st.h), 0, 0);
 
   const ctx = st.out.getContext('2d');
@@ -292,30 +313,99 @@ function render(st) {
   ctx.drawImage(st.tmp, 0, 0);
 }
 
-// Filtr minimum (erozja) lub maksimum (dylatacja) w oknie (2r+1) × (2r+1), osobno poziomo i pionowo
-function morph(a, w, h, r, useMax) {
-  const tmp = new Uint8ClampedArray(a.length);
-  const out = new Uint8ClampedArray(a.length);
+// ===== FUNKCJE POMOCNICZE =====
+function detectBars(ctx, width, height) {
+  const data = ctx.getImageData(0, 0, width, height).data;
 
-  for (let y = 0; y < h; y++) {
-    const row = y * w;
-    for (let x = 0; x < w; x++) {
-      let v = useMax ? 0 : 255;
-      const x0 = Math.max(0, x - r);
-      const x1 = Math.min(w - 1, x + r);
-      for (let k = x0; k <= x1; k++) {
-        const p = a[row + k];
-        if (useMax ? p > v : p < v) v = p;
+  function isRowBlack(y) {
+    let dark = 0;
+    const rowStart = y * width * 4;
+    for (let x = 0; x < width; x++) {
+      const i = rowStart + x * 4;
+      if (data[i] <= DARK_THRESHOLD &&
+          data[i + 1] <= DARK_THRESHOLD &&
+          data[i + 2] <= DARK_THRESHOLD) {
+        dark++;
       }
-      tmp[row + x] = v;
     }
+    return dark / width >= ROW_BLACK_RATIO;
   }
 
-  for (let x = 0; x < w; x++) {
-    for (let y = 0; y < h; y++) {
-      let v = useMax ? 0 : 255;
-      const y0 = Math.max(0, y - r);
-      const y1 = Math.min(h - 1, y + r);
+  let top = 0;
+  while (top < height && isRowBlack(top)) top++;
+
+  let bottom = 0;
+  while (bottom < height - top && isRowBlack(height - 1 - bottom)) bottom++;
+
+  return { top, bottom };
+}
+
+function loadImage(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('nie udało się wczytać obrazu')); };
+    img.src = url;
+  });
+}
+
+function canvasToBlob(canvas, type) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(b => b ? resolve(b) : reject(new Error('nie udało się zapisać obrazu')), type);
+  });
+}
+
+function setStatus(html) {
+  statusBox.innerHTML = html;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function addResult(name, seconds, top, bottom, model, device, stats, cropCanvas, st) {
+  const card = document.createElement('div');
+  card.className = 'card result-card';
+  card.innerHTML =
+    `<h2></h2>` +
+    `<div class="meta">Czas wycinania: <b>${seconds.toFixed(1)} s</b> · ${model} + ${device} · pasy: ${top} / ${bottom} px<br>` +
+    `${stats}</div>` +
+    `<div class="slider-row">Utwardzanie półprzezroczystości: <b class="rval">0</b> (0 = wyłączone)` +
+    `<input type="range" min="0" max="8" step="1" value="0"></div>` +
+    `<div class="pair">` +
+    `<figure><figcaption>Po przycięciu</figcaption></figure>` +
+    `<figure><figcaption>Po wycięciu</figcaption></figure>` +
+    `</div>`;
+  card.querySelector('h2').textContent = name;
+
+  const slider = card.querySelector('input[type="range"]');
+  const rval = card.querySelector('.rval');
+  slider.addEventListener('input', () => {
+    rval.textContent = slider.value;
+    render(st); // obliczenia są tanie, więc odświeżamy na bieżąco
+  });
+  st.slider = slider;
+
+  const figs = card.querySelectorAll('figure');
+  figs[0].appendChild(cropCanvas);
+  figs[1].appendChild(st.out);
+
+  resultsBox.appendChild(card);
+  states.push(st);
+}
+
+function addError(name, message) {
+  const card = document.createElement('div');
+  card.className = 'card result-card';
+  card.innerHTML = `<h2></h2><div class="error"></div>`;
+  card.querySelector('h2').textContent = name;
+  card.querySelector('.error').textContent = 'Błąd: ' + message;
+  resultsBox.appendChild(card);
+}
+</script>
+</body>
+</html>, y + r);
       for (let k = y0; k <= y1; k++) {
         const p = tmp[k * w + x];
         if (useMax ? p > v : p < v) v = p;
