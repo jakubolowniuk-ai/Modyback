@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Test wycinania — etap 2</title>
+<title>Test wycinania — etap 2b</title>
 <style>
   :root {
     --bg: #f4f4f5;
@@ -57,19 +57,31 @@
   }
   button:disabled { opacity: 0.4; cursor: default; }
   input[type="file"] { display: none; }
-  .color-row {
+  .row {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
     margin-top: 12px;
     color: var(--muted);
     font-size: 14px;
   }
-  .color-row input { width: 64px; height: 40px; border: none; background: none; }
+  .row select {
+    max-width: 62%;
+    padding: 8px;
+    font-size: 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .row input[type="color"] { width: 64px; height: 40px; border: none; background: none; }
   .info { line-height: 1.6; }
   .error { color: var(--error); }
   .result-card h2 { font-size: 15px; margin: 0 0 4px; word-break: break-all; }
   .result-card .meta { color: var(--muted); font-size: 14px; margin-bottom: 8px; }
+  .slider-row { margin: 8px 0 12px; font-size: 14px; color: var(--muted); }
+  .slider-row input { width: 100%; margin-top: 6px; }
   .pair {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -88,26 +100,39 @@
 </head>
 <body>
 
-<h1>Test wycinania produktu — etap 2</h1>
+<h1>Test wycinania produktu — etap 2b</h1>
 
 <div class="card">
   <label class="file-label" for="fileInput">Wybierz do 10 zdjęć</label>
   <input type="file" id="fileInput" accept="image/png, image/jpeg" multiple>
-  <label class="color-row">Kolor tła testowego
+
+  <label class="row">Model
+    <select id="modelSelect">
+      <option value="isnet_quint8">najszybszy (quint8)</option>
+      <option value="isnet_fp16" selected>domyślny (fp16)</option>
+      <option value="isnet">najdokładniejszy (pełny)</option>
+    </select>
+  </label>
+  <label class="row">Procesor
+    <select id="deviceSelect">
+      <option value="cpu" selected>CPU (pewny)</option>
+      <option value="gpu">GPU / WebGPU (jeśli telefon obsługuje)</option>
+    </select>
+  </label>
+  <label class="row">Kolor tła testowego
     <input type="color" id="bgColor" value="#00ff00">
   </label>
+
   <button id="startBtn" disabled>Start</button>
 </div>
 
-<div class="card info" id="status">Wybierz zdjęcia, żeby zacząć.</div>
+<div class="card info" id="status">Wczytywanie biblioteki…</div>
 
 <div id="results"></div>
 
 <script type="module">
-// Biblioteka z przypiętą wersją (nie "latest") — patrz zasady bezpieczeństwa w projekcie
-import { removeBackground } from 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.5.5/+esm';
-
 // ===== USTAWIENIA =====
+const LIB_URL = 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.5.5/+esm'; // przypięta wersja
 const MAX_FILES = 10;          // tyle zdjęć na test
 const DARK_THRESHOLD = 25;     // piksel czarny, jeśli każdy kanał ≤ 25 na 255
 const ROW_BLACK_RATIO = 0.7;   // wiersz należy do pasa, jeśli ≥ 70% pikseli jest czarnych
@@ -116,33 +141,56 @@ const ROW_BLACK_RATIO = 0.7;   // wiersz należy do pasa, jeśli ≥ 70% pikseli
 const fileInput = document.getElementById('fileInput');
 const startBtn = document.getElementById('startBtn');
 const bgColor = document.getElementById('bgColor');
+const modelSelect = document.getElementById('modelSelect');
+const deviceSelect = document.getElementById('deviceSelect');
 const statusBox = document.getElementById('status');
 const resultsBox = document.getElementById('results');
 
 let files = [];
+const states = []; // stan każdej karty z wynikiem (potrzebny do suwaka i zmiany koloru tła)
+
+// ===== WCZYTANIE BIBLIOTEKI (z czytelnym komunikatem, gdyby się nie udało) =====
+let removeBackground = null;
+try {
+  const lib = await import(LIB_URL);
+  removeBackground = lib.removeBackground;
+  setStatus('Biblioteka gotowa. Wybierz zdjęcia.');
+} catch (err) {
+  console.error(err);
+  setStatus(`<span class="error">Nie udało się wczytać biblioteki: ${escapeHtml(err.message)}</span>`);
+}
 
 fileInput.addEventListener('change', () => {
   files = Array.from(fileInput.files).slice(0, MAX_FILES);
-  startBtn.disabled = files.length === 0;
-  setStatus(files.length
-    ? `Wybrano zdjęć: <b>${files.length}</b>. Kliknij Start.`
-    : 'Wybierz zdjęcia, żeby zacząć.');
+  startBtn.disabled = files.length === 0 || !removeBackground;
+  if (removeBackground) {
+    setStatus(files.length
+      ? `Wybrano zdjęć: <b>${files.length}</b>. Kliknij Start.`
+      : 'Wybierz zdjęcia, żeby zacząć.');
+  }
 });
+
+// Zmiana koloru tła odświeża istniejące wyniki bez ponownego wycinania
+bgColor.addEventListener('change', () => states.forEach(render));
 
 startBtn.addEventListener('click', async () => {
   startBtn.disabled = true;
   fileInput.disabled = true;
   resultsBox.innerHTML = '';
+  states.length = 0;
+
+  const model = modelSelect.value;
+  const device = deviceSelect.value;
   const times = [];
 
   for (let i = 0; i < files.length; i++) {
     const label = `Zdjęcie ${i + 1} z ${files.length}`;
     try {
-      const seconds = await processFile(files[i], label);
+      const seconds = await processFile(files[i], label, model, device);
       times.push(seconds);
     } catch (err) {
       console.error(err);
-      addError(files[i].name, err.message);
+      addError(files[i].name, err.message || String(err));
     }
   }
 
@@ -150,7 +198,7 @@ startBtn.addEventListener('click', async () => {
   const rest = times.slice(1);
   const avg = rest.length ? rest.reduce((a, b) => a + b, 0) / rest.length : null;
   setStatus(
-    `Gotowe. Przetworzono: <b>${times.length}</b> z ${files.length}.` +
+    `Gotowe: <b>${model}</b> + <b>${device}</b>. Przetworzono: <b>${times.length}</b> z ${files.length}.` +
     (avg !== null
       ? `<br>Średni czas na zdjęcie (bez pierwszego): <b>${avg.toFixed(1)} s</b>` +
         `<br>Szacunek dla 200 zdjęć: <b>${Math.round(avg * 200 / 60)} min</b>`
@@ -161,7 +209,7 @@ startBtn.addEventListener('click', async () => {
 });
 
 // ===== PRZETWARZANIE JEDNEGO ZDJĘCIA =====
-async function processFile(file, label) {
+async function processFile(file, label, model, device) {
   setStatus(`${label}: wczytywanie…`);
   const img = await loadImage(file);
 
@@ -173,18 +221,21 @@ async function processFile(file, label) {
 
   // 1. Przycięcie czarnych pasów (jak w etapie 1)
   const { top, bottom } = detectBars(sctx, src.width, src.height);
-  const contentH = src.height - top - bottom;
-  if (contentH <= 0) throw new Error('Całe zdjęcie wygląda na czarne.');
+  const w = src.width;
+  const h = src.height - top - bottom;
+  if (h <= 0) throw new Error('Całe zdjęcie wygląda na czarne.');
 
   const crop = document.createElement('canvas');
-  crop.width = src.width;
-  crop.height = contentH;
-  crop.getContext('2d').drawImage(src, 0, top, src.width, contentH, 0, 0, src.width, contentH);
+  crop.width = w;
+  crop.height = h;
+  crop.getContext('2d').drawImage(src, 0, top, w, h, 0, 0, w, h);
   const cropBlob = await canvasToBlob(crop, 'image/png');
 
   // 2. Wycięcie produktu modelem AI (zwraca PNG z przezroczystym tłem)
   const t0 = performance.now();
   const cutBlob = await removeBackground(cropBlob, {
+    model,
+    device,
     progress: (key, current, total) => {
       const what = key.startsWith('fetch') ? 'pobieranie modelu (tylko za pierwszym razem)' : 'przetwarzanie';
       const pct = total ? ` ${Math.round(current / total * 100)}%` : '';
@@ -193,18 +244,86 @@ async function processFile(file, label) {
   });
   const seconds = (performance.now() - t0) / 1000;
 
-  // 3. Złożenie wyniku na jednolitym tle testowym
+  // 3. Wyciągamy z wyniku piksele i osobno przezroczystość (maskę)
   const cutImg = await loadImage(cutBlob);
-  const out = document.createElement('canvas');
-  out.width = crop.width;
-  out.height = crop.height;
-  const octx = out.getContext('2d');
-  octx.fillStyle = bgColor.value;
-  octx.fillRect(0, 0, out.width, out.height);
-  octx.drawImage(cutImg, 0, 0, out.width, out.height);
+  const tmp = document.createElement('canvas');
+  tmp.width = w;
+  tmp.height = h;
+  const tctx = tmp.getContext('2d', { willReadFrequently: true });
+  tctx.drawImage(cutImg, 0, 0, w, h);
+  const cut = tctx.getImageData(0, 0, w, h);
 
-  addResult(file.name, seconds, top, bottom, crop, out);
+  const alpha = new Uint8ClampedArray(w * h);
+  for (let i = 0; i < alpha.length; i++) alpha[i] = cut.data[i * 4 + 3];
+
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+
+  const st = { w, h, cut, alpha, tmp, tctx, out, slider: null, cacheR: -1, cacheA: null };
+  addResult(file.name, seconds, top, bottom, model, device, crop, st);
+  render(st);
   return seconds;
+}
+
+// ===== SKŁADANIE WYNIKU (z czyszczeniem smug) =====
+function render(st) {
+  const r = Number(st.slider.value);
+
+  let a;
+  if (r === 0) {
+    a = st.alpha;
+  } else {
+    if (st.cacheR !== r) {
+      // otwarcie morfologiczne = erozja (zmniejszenie maski) + dylatacja (powiększenie z powrotem)
+      st.cacheA = morph(morph(st.alpha, st.w, st.h, r, false), st.w, st.h, r, true);
+      st.cacheR = r;
+    }
+    a = st.cacheA;
+  }
+
+  const data = new Uint8ClampedArray(st.cut.data); // kopia pikseli produktu
+  for (let i = 0; i < a.length; i++) data[i * 4 + 3] = a[i];
+  st.tctx.putImageData(new ImageData(data, st.w, st.h), 0, 0);
+
+  const ctx = st.out.getContext('2d');
+  ctx.fillStyle = bgColor.value;
+  ctx.fillRect(0, 0, st.w, st.h);
+  ctx.drawImage(st.tmp, 0, 0);
+}
+
+// Filtr minimum (erozja) lub maksimum (dylatacja) w oknie (2r+1) × (2r+1), osobno poziomo i pionowo
+function morph(a, w, h, r, useMax) {
+  const tmp = new Uint8ClampedArray(a.length);
+  const out = new Uint8ClampedArray(a.length);
+
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      let v = useMax ? 0 : 255;
+      const x0 = Math.max(0, x - r);
+      const x1 = Math.min(w - 1, x + r);
+      for (let k = x0; k <= x1; k++) {
+        const p = a[row + k];
+        if (useMax ? p > v : p < v) v = p;
+      }
+      tmp[row + x] = v;
+    }
+  }
+
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) {
+      let v = useMax ? 0 : 255;
+      const y0 = Math.max(0, y - r);
+      const y1 = Math.min(h - 1, y + r);
+      for (let k = y0; k <= y1; k++) {
+        const p = tmp[k * w + x];
+        if (useMax ? p > v : p < v) v = p;
+      }
+      out[y * w + x] = v;
+    }
+  }
+  return out;
 }
 
 // ===== FUNKCJE POMOCNICZE =====
@@ -254,21 +373,36 @@ function setStatus(html) {
   statusBox.innerHTML = html;
 }
 
-function addResult(name, seconds, top, bottom, cropCanvas, outCanvas) {
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function addResult(name, seconds, top, bottom, model, device, cropCanvas, st) {
   const card = document.createElement('div');
   card.className = 'card result-card';
   card.innerHTML =
     `<h2></h2>` +
-    `<div class="meta">Czas wycinania: <b>${seconds.toFixed(1)} s</b> · pasy: ${top} / ${bottom} px</div>` +
+    `<div class="meta">Czas wycinania: <b>${seconds.toFixed(1)} s</b> · ${model} + ${device} · pasy: ${top} / ${bottom} px</div>` +
+    `<div class="slider-row">Czyszczenie smug: <b class="rval">0</b> px (0 = wyłączone)` +
+    `<input type="range" min="0" max="6" step="1" value="0"></div>` +
     `<div class="pair">` +
     `<figure><figcaption>Po przycięciu</figcaption></figure>` +
     `<figure><figcaption>Po wycięciu</figcaption></figure>` +
     `</div>`;
   card.querySelector('h2').textContent = name;
+
+  const slider = card.querySelector('input[type="range"]');
+  const rval = card.querySelector('.rval');
+  slider.addEventListener('input', () => { rval.textContent = slider.value; });
+  slider.addEventListener('change', () => render(st)); // przeliczamy po puszczeniu suwaka
+  st.slider = slider;
+
   const figs = card.querySelectorAll('figure');
   figs[0].appendChild(cropCanvas);
-  figs[1].appendChild(outCanvas);
+  figs[1].appendChild(st.out);
+
   resultsBox.appendChild(card);
+  states.push(st);
 }
 
 function addError(name, message) {
@@ -281,4 +415,4 @@ function addError(name, message) {
 }
 </script>
 </body>
-  </html>
+</html>
