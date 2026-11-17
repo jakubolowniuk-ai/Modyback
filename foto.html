@@ -151,6 +151,7 @@ const JPG_QUALITY = 0.95;
 const BG_MARGIN = 1.25;       // tło jest o 25% większe niż zdjęcie (miejsce na przesunięcie)
 const SHIFT_MIN = 0.3, SHIFT_MAX = 0.7;  // losowe przesunięcie okna tła (0 = lewa/górna krawędź, 1 = prawa/dolna)
 const EDGE_LO = 60, EDGE_HI = 200;       // zaostrzanie krawędzi maski
+const EDGE_ERODE = 1.5;                  // zwężenie maski w px (pełna rozdzielczość); 0 = wyłączone
 const THUMB_W = 220;
 const ZIP_PART = 25;                     // ile zdjęć w jednym ZIP-ie
 
@@ -249,12 +250,34 @@ const EDGE_LUT = (() => {
   for (let a = 0; a < 256; a++) l[a] = Math.max(0, Math.min(255, ((a - EDGE_LO) / (EDGE_HI - EDGE_LO)) * 255));
   return l;
 })();
-function sharpenAlpha(canvas) {
+function sharpenAlpha(canvas, r = 0) {
   const ctx = canvas.getContext('2d');
   const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const d = id.data;
   for (let i = 3; i < d.length; i += 4) d[i] = EDGE_LUT[d[i]];
+  if (r > 0) erodeAlpha(d, canvas.width, canvas.height, r);
   ctx.putImageData(id, 0, 0);
+}
+// Zwężenie maski o r px (minimum w oknie, brzegi zdjęcia nie są obcinane).
+// Usuwa obwódkę w kolorze starego tła wokół produktu.
+function erodeAlpha(d, w, h, r) {
+  const a = new Uint8ClampedArray(w * h), t = new Uint8ClampedArray(w * h);
+  for (let i = 0; i < a.length; i++) a[i] = d[i * 4 + 3];
+  for (let y = 0; y < h; y++) {          // poziomo
+    const o = y * w;
+    for (let x = 0; x < w; x++) {
+      let m = 255;
+      for (let k = Math.max(0, x - r), e = Math.min(w - 1, x + r); k <= e; k++) if (a[o + k] < m) m = a[o + k];
+      t[o + x] = m;
+    }
+  }
+  for (let x = 0; x < w; x++) {          // pionowo
+    for (let y = 0; y < h; y++) {
+      let m = 255;
+      for (let k = Math.max(0, y - r), e = Math.min(h - 1, y + r); k <= e; k++) if (t[k * w + x] < m) m = t[k * w + x];
+      d[(y * w + x) * 4 + 3] = m;
+    }
+  }
 }
 
 // ===================== RENDER JEDNEGO ZDJĘCIA =====================
@@ -286,7 +309,7 @@ async function renderPhoto(p, outW, { showMask = false } = {}) {
     const mc = m.getContext('2d');
     mc.imageSmoothingQuality = 'high';
     mc.drawImage(maskCanvas(p), 0, 0, cw, ch);
-    sharpenAlpha(m);
+    sharpenAlpha(m, Math.round(EDGE_ERODE * k));
 
     layer = mk(cw, ch);
     const lc = layer.getContext('2d');
@@ -324,20 +347,15 @@ async function ensureModel() {
   if (model) return;
   $('runInfo').textContent = 'Ładuję model (za pierwszym razem pobiera ok. 100 MB)…';
   tf = await import(TF_URL);
-  let lastErr = null;
-  for (const device of ['wasm', 'cpu']) {
-    try {
-      model = await tf.AutoModel.from_pretrained(MODEL_ID, {
-        device, dtype: 'fp16',
-        progress_callback: pr => {
-          if (pr && pr.status === 'progress' && pr.progress != null)
-            $('runInfo').textContent = `Pobieram model: ${Math.round(pr.progress)}%`;
-        }
-      });
-      return;
-    } catch (e) { lastErr = e; }
-  }
-  throw lastErr;
+  // W przeglądarce działa tylko 'wasm' (CPU) — 'cpu' istnieje wyłącznie w Node.js,
+  // a jego próba zasłaniała prawdziwy komunikat błędu.
+  model = await tf.AutoModel.from_pretrained(MODEL_ID, {
+    device: 'wasm', dtype: 'fp16',
+    progress_callback: pr => {
+      if (pr && pr.status === 'progress' && pr.progress != null)
+        $('runInfo').textContent = `Pobieram model: ${Math.round(pr.progress)}%`;
+    }
+  });
 }
 
 async function inferMask(squareCanvas) {
@@ -358,13 +376,13 @@ async function inferMask(squareCanvas) {
   }
   if (!out) throw lastErr;
 
-  // wybieramy wyjście o rozmiarze 512×512
-  let t = null;
-  for (const v of Object.values(out)) {
+  // Model ma jedno wyjście: 'logits' [1,1,512,512]
+  let t = out.logits;
+  if (!t) for (const v of Object.values(out)) {
     const n = (v.dims || []).reduce((a, b) => a * b, 1);
-    if (n === N) { t = v; }
+    if (n === N) { t = v; break; }
   }
-  if (!t) t = out.logits || out.output_image || Object.values(out)[0];
+  if (!t) throw new Error('Model nie zwrócił maski 512×512');
 
   let data = typeof t.getData === 'function' ? await t.getData() : (t.ort_tensor?.getData ? await t.ort_tensor.getData() : t.data);
   let arr;
@@ -373,14 +391,14 @@ async function inferMask(squareCanvas) {
     for (let i = 0; i < data.length; i++) arr[i] = half2float(data[i]);
   } else arr = data;
 
-  let min = Infinity, max = -Infinity;
-  for (let i = 0; i < N; i++) { const v = arr[i]; if (v < min) min = v; if (v > max) max = v; }
-  const already01 = min >= 0 && max <= 1;
+  // Wyjście to zawsze logity → zawsze sigmoid. (Wcześniej sigmoid był pomijany, gdy
+  // wszystkie wartości wypadły w 0–1 — na niepewnym zdjęciu dawało to złą maskę.)
   const mask = new Uint8Array(N);
   for (let i = 0; i < N; i++) {
-    const a = already01 ? arr[i] : 1 / (1 + Math.exp(-arr[i]));
+    const a = 1 / (1 + Math.exp(-arr[i]));
     mask[i] = Math.max(0, Math.min(255, Math.round(a * 255)));
   }
+  for (const v of [input, ...Object.values(out)]) { try { v.dispose && v.dispose(); } catch (e) {} }
   return mask;
 }
 
@@ -623,7 +641,7 @@ $('fyRange').addEventListener('input', onSlide);
 $('vPrev').addEventListener('click', () => { if (vIdx > 0) { vIdx--; vShowMask = false; syncViewer(); $('viewer').scrollTop = 0; } });
 $('vNext').addEventListener('click', () => { if (vIdx < photos.length - 1) { vIdx++; vShowMask = false; syncViewer(); $('viewer').scrollTop = 0; } });
 $('vClose').addEventListener('click', closeViewer);
-$('vMask').addEventListener('click', () => { vShowMask = !vShowMask; syncViewer(); });
+$('vMask').addEventListener('click', () => { vShowMask = !vShowMask; syncViewer(); $('viewer').scrollTop = 0; });
 $('vReroll').addEventListener('click', async () => {
   const p = photos[vIdx];
   p.randTop = rnd(BAR_MIN, BAR_MAX); p.randBottom = rnd(BAR_MIN, BAR_MAX);
