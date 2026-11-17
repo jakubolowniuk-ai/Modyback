@@ -115,6 +115,7 @@
     <div class="bgstrip" id="viewerStrip"></div>
     <label class="f">Przesunięcie tła w poziomie <input type="range" id="fxRange" min="0" max="100"></label>
     <label class="f">Przesunięcie tła w pionie <input type="range" id="fyRange" min="0" max="100"></label>
+    <label class="f">Cień pod produktem <span id="shVal"></span><input type="range" id="shRange" min="0" max="100"></label>
     <button class="sec" id="vMask">Pokaż maskę (biały = produkt)</button>
     <button class="sec" id="vApplyAll">Użyj tego tła jako domyślnego dla wszystkich</button>
   </div>
@@ -151,7 +152,10 @@ const JPG_QUALITY = 0.95;
 const BG_MARGIN = 1.25;       // tło jest o 25% większe niż zdjęcie (miejsce na przesunięcie)
 const SHIFT_MIN = 0.3, SHIFT_MAX = 0.7;  // losowe przesunięcie okna tła (0 = lewa/górna krawędź, 1 = prawa/dolna)
 const EDGE_LO = 60, EDGE_HI = 200;       // zaostrzanie krawędzi maski
-const EDGE_ERODE = 1.5;                  // zwężenie maski w px (pełna rozdzielczość); 0 = wyłączone
+const GF_DIV = 300, GF_EPS = 0.001;      // filtr prowadzony: promień = dłuższy bok / GF_DIV; mniejsze EPS = ostrzej
+const SPECK_MAX = 0.0003, SPECK_CONF = 180; // okruchy: mniejsze niż 0,03% maski i niepewne (max < 180/255)
+const SHADOW_DEFAULT = 50;               // siła cienia 0–100 (suwak w podglądzie)
+const isFloorBg = name => name.startsWith('panele');  // panele = podłoga, reszta = ściana
 const THUMB_W = 220;
 const ZIP_PART = 25;                     // ile zdjęć w jednym ZIP-ie
 
@@ -228,16 +232,42 @@ async function getBg(name) {
   return bgCache[name];
 }
 
-// maska 512×512 → płótno z białym kolorem i alfą = maska
+// Usuwa z maski 512×512 małe, oderwane i niepewne okruchy (strzępki starego tła).
+// Kawałek jest usuwany tylko wtedy, gdy jest mały ORAZ model nie był go pewny —
+// pewne fragmenty produktu (np. oderwany kawałek rzemyka) zostają.
+function cleanSpecks(mask) {
+  const S = MODEL_SIZE, N = S * S, out = new Uint8Array(mask);
+  const seen = new Uint8Array(N), stack = new Int32Array(N), comp = new Int32Array(N);
+  const maxArea = Math.max(4, Math.round(N * SPECK_MAX));
+  for (let s = 0; s < N; s++) {
+    if (seen[s] || mask[s] <= 30) continue;
+    let sp = 0, n = 0, peak = 0;
+    stack[sp++] = s; seen[s] = 1;
+    while (sp) {
+      const i = stack[--sp]; comp[n++] = i;
+      if (mask[i] > peak) peak = mask[i];
+      const x = i % S;
+      if (x > 0 && !seen[i-1] && mask[i-1] > 30) { seen[i-1] = 1; stack[sp++] = i-1; }
+      if (x < S-1 && !seen[i+1] && mask[i+1] > 30) { seen[i+1] = 1; stack[sp++] = i+1; }
+      if (i >= S && !seen[i-S] && mask[i-S] > 30) { seen[i-S] = 1; stack[sp++] = i-S; }
+      if (i < N-S && !seen[i+S] && mask[i+S] > 30) { seen[i+S] = 1; stack[sp++] = i+S; }
+    }
+    if (n <= maxArea && peak < SPECK_CONF) for (let j = 0; j < n; j++) out[comp[j]] = 0;
+  }
+  return out;
+}
+
+// maska 512×512 → płótno z białym kolorem i alfą = maska (po usunięciu okruchów)
 function maskCanvas(p) {
   let c = maskCanvasCache.get(p.id);
   if (c && c._v === p.maskV) return c;
+  const m = cleanSpecks(p.mask);
   c = mk(MODEL_SIZE, MODEL_SIZE);
   const ctx = c.getContext('2d');
   const id = ctx.createImageData(MODEL_SIZE, MODEL_SIZE);
-  for (let i = 0; i < p.mask.length; i++) {
+  for (let i = 0; i < m.length; i++) {
     id.data[i*4] = id.data[i*4+1] = id.data[i*4+2] = 255;
-    id.data[i*4+3] = p.mask[i];
+    id.data[i*4+3] = m[i];
   }
   ctx.putImageData(id, 0, 0);
   c._v = p.maskV;
@@ -250,33 +280,92 @@ const EDGE_LUT = (() => {
   for (let a = 0; a < 256; a++) l[a] = Math.max(0, Math.min(255, ((a - EDGE_LO) / (EDGE_HI - EDGE_LO)) * 255));
   return l;
 })();
-function sharpenAlpha(canvas, r = 0) {
-  const ctx = canvas.getContext('2d');
-  const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const d = id.data;
-  for (let i = 3; i < d.length; i += 4) d[i] = EDGE_LUT[d[i]];
-  if (r > 0) erodeAlpha(d, canvas.width, canvas.height, r);
-  ctx.putImageData(id, 0, 0);
-}
-// Zwężenie maski o r px (minimum w oknie, brzegi zdjęcia nie są obcinane).
-// Usuwa obwódkę w kolorze starego tła wokół produktu.
-function erodeAlpha(d, w, h, r) {
-  const a = new Uint8ClampedArray(w * h), t = new Uint8ClampedArray(w * h);
-  for (let i = 0; i < a.length; i++) a[i] = d[i * 4 + 3];
-  for (let y = 0; y < h; y++) {          // poziomo
-    const o = y * w;
+
+// Średnia w oknie (2r+1)×(2r+1), liczona sumą bieżącą — szybka niezależnie od r
+function boxMean(a, w, h, r) {
+  const t = new Float32Array(w * h), o = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const row = y * w; let s = 0;
+    for (let x = 0; x <= Math.min(r, w - 1); x++) s += a[row + x];
     for (let x = 0; x < w; x++) {
-      let m = 255;
-      for (let k = Math.max(0, x - r), e = Math.min(w - 1, x + r); k <= e; k++) if (a[o + k] < m) m = a[o + k];
-      t[o + x] = m;
+      t[row + x] = s / (Math.min(w - 1, x + r) - Math.max(0, x - r) + 1);
+      if (x + r + 1 < w) s += a[row + x + r + 1];
+      if (x - r >= 0) s -= a[row + x - r];
     }
   }
-  for (let x = 0; x < w; x++) {          // pionowo
+  for (let x = 0; x < w; x++) {
+    let s = 0;
+    for (let y = 0; y <= Math.min(r, h - 1); y++) s += t[y * w + x];
     for (let y = 0; y < h; y++) {
-      let m = 255;
-      for (let k = Math.max(0, y - r), e = Math.min(h - 1, y + r); k <= e; k++) if (t[k * w + x] < m) m = t[k * w + x];
-      d[(y * w + x) * 4 + 3] = m;
+      o[y * w + x] = s / (Math.min(h - 1, y + r) - Math.max(0, y - r) + 1);
+      if (y + r + 1 < h) s += t[(y + r + 1) * w + x];
+      if (y - r >= 0) s -= t[(y - r) * w + x];
     }
+  }
+  return o;
+}
+
+// Filtr prowadzony (guided filter): rozmyta maska z modelu „przykleja się”
+// do prawdziwych krawędzi zdjęcia w pełnej rozdzielczości.
+function guidedFilter(I, P, w, h, r, eps) {
+  const n = w * h, II = new Float32Array(n), IP = new Float32Array(n);
+  for (let i = 0; i < n; i++) { II[i] = I[i] * I[i]; IP[i] = I[i] * P[i]; }
+  const mI = boxMean(I, w, h, r), mP = boxMean(P, w, h, r);
+  const mII = boxMean(II, w, h, r), mIP = boxMean(IP, w, h, r);
+  const A = II, B = IP;                     // ponowne użycie pamięci
+  for (let i = 0; i < n; i++) {
+    const a = (mIP[i] - mI[i] * mP[i]) / (mII[i] - mI[i] * mI[i] + eps);
+    A[i] = a; B[i] = mP[i] - a * mI[i];
+  }
+  const mA = boxMean(A, w, h, r), mB = boxMean(B, w, h, r);
+  const q = mI;                             // ponowne użycie pamięci
+  for (let i = 0; i < n; i++) q[i] = mA[i] * I[i] + mB[i];
+  return q;
+}
+
+// Maska w rozmiarze cw×ch dopasowana do zdjęcia (biały + alfa). Pamięta kilka ostatnich.
+const refineCache = new Map();
+function refinedMask(p, content, cw, ch) {
+  const key = `${p.id}|${p.maskV}|${cw}x${ch}`;
+  if (refineCache.has(key)) return refineCache.get(key);
+  const m = mk(cw, ch);
+  const mc = m.getContext('2d', { willReadFrequently: true });
+  mc.imageSmoothingQuality = 'high';
+  mc.drawImage(maskCanvas(p), 0, 0, cw, ch);
+  const md = mc.getImageData(0, 0, cw, ch);
+  const src = content.getContext('2d').getImageData(0, 0, cw, ch).data;
+  const n = cw * ch, I = new Float32Array(n), P = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    I[i] = (0.299 * src[i*4] + 0.587 * src[i*4+1] + 0.114 * src[i*4+2]) / 255;
+    P[i] = md.data[i*4+3] / 255;
+  }
+  const r = Math.max(2, Math.round(Math.max(cw, ch) / GF_DIV));
+  const q = guidedFilter(I, P, cw, ch, r, GF_EPS);
+  for (let i = 0; i < n; i++) md.data[i*4+3] = EDGE_LUT[Math.max(0, Math.min(255, Math.round(q[i] * 255)))];
+  mc.putImageData(md, 0, 0);
+  refineCache.set(key, m);
+  if (refineCache.size > 4) refineCache.delete(refineCache.keys().next().value);
+  return m;
+}
+
+// Cień z kształtu produktu. Podłoga: ciemny przy styku + miękki dookoła.
+// Ściana (produkt trzymany przed ścianą): jeden miękki cień przesunięty w dół i w prawo.
+function drawShadow(ctx, mask, cw, ch, strength, floor) {
+  if (strength <= 0) return;
+  const s = mk(cw, ch), sc = s.getContext('2d');
+  sc.drawImage(mask, 0, 0);
+  sc.globalCompositeOperation = 'source-in';
+  sc.fillStyle = '#000'; sc.fillRect(0, 0, cw, ch);
+  const W = Math.max(cw, ch);
+  const layers = floor
+    ? [ { blur: 0.006, dx: 0, dy: 0.003, a: 0.65 }, { blur: 0.025, dx: 0.006, dy: 0.014, a: 0.35 } ]
+    : [ { blur: 0.03, dx: 0.02, dy: 0.03, a: 0.32 } ];
+  for (const L of layers) {
+    ctx.save();
+    ctx.filter = `blur(${Math.max(1, L.blur * W).toFixed(1)}px)`;
+    ctx.globalAlpha = Math.min(1, L.a * strength);
+    ctx.drawImage(s, L.dx * W, L.dy * W);
+    ctx.restore();
   }
 }
 
@@ -305,11 +394,7 @@ async function renderPhoto(p, outW, { showMask = false } = {}) {
   let layer = content;
   const useBg = p.status === 'done' && p.mask && !p.keepOriginal;
   if (useBg) {
-    const m = mk(cw, ch);
-    const mc = m.getContext('2d');
-    mc.imageSmoothingQuality = 'high';
-    mc.drawImage(maskCanvas(p), 0, 0, cw, ch);
-    sharpenAlpha(m, Math.round(EDGE_ERODE * k));
+    const m = refinedMask(p, content, cw, ch);
 
     layer = mk(cw, ch);
     const lc = layer.getContext('2d');
@@ -328,6 +413,7 @@ async function renderPhoto(p, outW, { showMask = false } = {}) {
       const dw = bgImg.width * s, dh = bgImg.height * s;
       lc.imageSmoothingQuality = 'high';
       lc.drawImage(bgImg, -(dw - cw) * p.fx, -(dh - ch) * p.fy, dw, dh);
+      drawShadow(lc, m, cw, ch, (p.shadow ?? SHADOW_DEFAULT) / 50, isFloorBg(effBg(p)));
       lc.drawImage(prod, 0, 0);
     }
   }
@@ -597,6 +683,8 @@ function syncViewer() {
   $('vTop').value = p.top; $('vBottom').value = p.bottom;
   $('fxRange').value = Math.round(p.fx * 100);
   $('fyRange').value = Math.round(p.fy * 100);
+  $('shRange').value = p.shadow ?? SHADOW_DEFAULT;
+  $('shVal').textContent = `(${p.shadow ?? SHADOW_DEFAULT})`;
   $('vMask').textContent = vShowMask ? 'Ukryj maskę' : 'Pokaż maskę (biały = produkt)';
   buildStrip($('viewerStrip'),
     id => p.keepOriginal ? id === '__orig' : (p.bg ? id === p.bg : false),
@@ -632,12 +720,14 @@ let saveTimer = null;
 function onSlide() {
   const p = photos[vIdx];
   p.fx = $('fxRange').value / 100; p.fy = $('fyRange').value / 100;
+  p.shadow = +$('shRange').value; $('shVal').textContent = `(${p.shadow})`;
   drawViewer();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => { savePhoto(p); refreshCard(p); }, 400);
 }
 $('fxRange').addEventListener('input', onSlide);
 $('fyRange').addEventListener('input', onSlide);
+$('shRange').addEventListener('input', onSlide);
 $('vPrev').addEventListener('click', () => { if (vIdx > 0) { vIdx--; vShowMask = false; syncViewer(); $('viewer').scrollTop = 0; } });
 $('vNext').addEventListener('click', () => { if (vIdx < photos.length - 1) { vIdx++; vShowMask = false; syncViewer(); $('viewer').scrollTop = 0; } });
 $('vClose').addEventListener('click', closeViewer);
