@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foto — tła (część 1)</title>
+<style>
+  :root {
+    --bg:#f4f4f5; --card:#fff; --text:#18181b; --muted:#71717a;
+    --accent:#2563eb; --border:#e4e4e7; --error:#dc2626; --ok:#16a34a; --warn:#d97706;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#18181b; --card:#27272a; --text:#f4f4f5; --muted:#a1a1aa;
+            --accent:#60a5fa; --border:#3f3f46; --error:#f87171; --ok:#4ade80; --warn:#fbbf24; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:12px; background:var(--bg); color:var(--text);
+         font-family:system-ui,sans-serif; font-size:16px; }
+  h1 { font-size:20px; margin:4px 0 12px; }
+  h2 { font-size:16px; margin:0 0 8px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px;
+          padding:14px; margin-bottom:12px; }
+  button, .btn { display:block; width:100%; padding:13px; margin-top:8px; border:none;
+          border-radius:10px; background:var(--accent); color:#fff; font-size:16px;
+          text-align:center; cursor:pointer; }
+  button.sec, .btn.sec { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  button.danger { background:var(--error); }
+  button:disabled { opacity:.4; cursor:default; }
+  button.small { width:auto; display:inline-block; padding:9px 12px; margin:4px 4px 0 0; font-size:14px; }
+  input[type=file] { display:none; }
+  .muted { color:var(--muted); font-size:14px; line-height:1.5; }
+  .error { color:var(--error); }
+  .bar { height:10px; background:var(--border); border-radius:6px; overflow:hidden; margin:8px 0; }
+  .bar > div { height:100%; width:0; background:var(--accent); transition:width .2s; }
+  .bgstrip { display:flex; gap:8px; overflow-x:auto; padding:4px 0 8px; }
+  .bgitem { flex:0 0 auto; width:64px; text-align:center; font-size:11px; color:var(--muted); cursor:pointer; }
+  .bgitem div { width:64px; height:88px; border-radius:8px; background-size:cover;
+                background-position:center; border:3px solid transparent; }
+  .bgitem.sel div { border-color:var(--accent); }
+  .bgitem.sel { color:var(--text); font-weight:600; }
+  .bgitem.orig div { background:repeating-conic-gradient(#888 0% 25%,#bbb 0% 50%) 50%/12px 12px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(105px,1fr)); gap:8px; }
+  .thumb { position:relative; border:2px solid var(--border); border-radius:8px; overflow:hidden;
+           background:#000; cursor:pointer; min-height:80px; }
+  .thumb canvas { width:100%; display:block; }
+  .thumb .tag { position:absolute; left:3px; top:3px; padding:1px 6px; border-radius:6px;
+                font-size:11px; background:rgba(0,0,0,.65); color:#fff; }
+  .thumb .tag.warn { background:var(--warn); color:#000; }
+  .thumb .tag.err { background:var(--error); }
+  .thumb .tag.ok { background:var(--ok); color:#000; }
+  .thumb .num { position:absolute; right:3px; bottom:3px; font-size:11px; color:#fff;
+                background:rgba(0,0,0,.55); padding:0 5px; border-radius:6px; }
+  /* podgląd pojedynczego zdjęcia */
+  #viewer { position:fixed; inset:0; background:var(--bg); z-index:10; overflow-y:auto;
+            padding:12px; display:none; }
+  #viewer.open { display:block; }
+  #vcanvasWrap { background:#000; border-radius:8px; overflow:hidden; text-align:center; }
+  #vcanvas { max-width:100%; max-height:62vh; display:inline-block; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  label.f { font-size:13px; color:var(--muted); display:block; margin-top:8px; }
+  input[type=number] { width:100%; padding:10px; font-size:16px; border:1px solid var(--border);
+          border-radius:8px; background:var(--bg); color:var(--text); }
+  input[type=range] { width:100%; }
+</style>
+</head>
+<body>
+
+<h1>Foto — tła (część 1)</h1>
+
+<div class="card">
+  <h2>1. Dodaj zdjęcia</h2>
+  <label class="btn" for="fileInput">Wybierz zrzuty ekranu (JPG / PNG)</label>
+  <input type="file" id="fileInput" accept="image/png, image/jpeg" multiple>
+  <div class="muted" id="importInfo">Możesz dodawać kolejne porcje. Zdjęcia zostają zapamiętane w telefonie.</div>
+</div>
+
+<div class="card">
+  <h2>2. Tło domyślne dla całej paczki</h2>
+  <div class="bgstrip" id="defaultStrip"></div>
+  <div class="muted">Na zdjęciu możesz potem wybrać inne tło ręcznie.</div>
+</div>
+
+<div class="card">
+  <h2>3. Wycinanie produktów</h2>
+  <button id="runBtn" disabled>Start wycinania</button>
+  <div class="bar"><div id="progBar"></div></div>
+  <div class="muted" id="runInfo">Brak zdjęć.</div>
+</div>
+
+<div class="card">
+  <h2>4. Sprawdź zdjęcia</h2>
+  <div class="muted" style="margin-bottom:8px">Dotknij zdjęcia, żeby zobaczyć je w całości, zmienić tło lub poprawić paski.</div>
+  <div class="grid" id="grid"></div>
+</div>
+
+<div class="card">
+  <h2>5. Eksport</h2>
+  <div class="muted" id="exportInfo">Eksport jest dostępny po wycięciu zdjęć.</div>
+  <div id="exportParts"></div>
+  <button class="danger" id="clearBtn" disabled>Usuń całą paczkę z telefonu</button>
+</div>
+
+<!-- Podgląd pojedynczego zdjęcia -->
+<div id="viewer">
+  <div class="row" style="margin-bottom:8px">
+    <button class="sec" id="vPrev" style="margin:0">← Poprzednie</button>
+    <button class="sec" id="vNext" style="margin:0">Następne →</button>
+  </div>
+  <div id="vTitle" class="muted" style="margin-bottom:6px"></div>
+  <div id="vcanvasWrap"><canvas id="vcanvas"></canvas></div>
+  <div class="muted" id="vInfo" style="margin-top:6px"></div>
+
+  <div class="card" style="margin-top:10px">
+    <h2>Tło tego zdjęcia</h2>
+    <div class="bgstrip" id="viewerStrip"></div>
+    <label class="f">Przesunięcie tła w poziomie <input type="range" id="fxRange" min="0" max="100"></label>
+    <label class="f">Przesunięcie tła w pionie <input type="range" id="fyRange" min="0" max="100"></label>
+    <button class="sec" id="vMask">Pokaż maskę (biały = produkt)</button>
+    <button class="sec" id="vApplyAll">Użyj tego tła jako domyślnego dla wszystkich</button>
+  </div>
+
+  <div class="card">
+    <h2>Czarne paski</h2>
+    <div class="row">
+      <label class="f">Pas u góry w oryginale (px)<input type="number" id="vTop" min="0" inputmode="numeric"></label>
+      <label class="f">Pas u dołu w oryginale (px)<input type="number" id="vBottom" min="0" inputmode="numeric"></label>
+    </div>
+    <button class="sec" id="vBars">Zastosuj pasy (wymaga ponownego wycięcia)</button>
+    <button class="sec" id="vReroll">Wylosuj nowe paski (6–30 px)</button>
+  </div>
+
+  <button id="vClose">Zamknij podgląd</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+// ===================== USTAWIENIA =====================
+const BGS = [
+  ['kamien1','Kamień 1'], ['kamien2','Kamień 2'],
+  ['panele1','Panele 1'], ['panele2','Panele 2'], ['panele3','Panele 3'],
+  ['panele4','Panele 4'], ['panele5','Panele 5'], ['panele6','Panele 6'],
+  ['sciana1','Ściana 1'], ['sciana2','Ściana 2']
+];
+const BG_DIR = 'tla/';               // folder z tłami w repozytorium
+const MODEL_ID = 'h143N/birefnet-lite-512-chunked';
+const TF_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0';
+const MODEL_SIZE = 512;
+const DARK_THRESHOLD = 25, ROW_BLACK_RATIO = 0.7;   // wykrywanie pasów
+const BAR_MIN = 6, BAR_MAX = 30;                    // losowy pasek (px)
+const JPG_QUALITY = 0.95;
+const BG_MARGIN = 1.25;       // tło jest o 25% większe niż zdjęcie (miejsce na przesunięcie)
+const SHIFT_MIN = 0.3, SHIFT_MAX = 0.7;  // losowe przesunięcie okna tła (0 = lewa/górna krawędź, 1 = prawa/dolna)
+const EDGE_LO = 60, EDGE_HI = 200;       // zaostrzanie krawędzi maski
+const THUMB_W = 220;
+const ZIP_PART = 25;                     // ile zdjęć w jednym ZIP-ie
+
+// ===================== STAN =====================
+let photos = [];          // wszystkie zdjęcia (rekordy)
+let defaultBg = 'sciana1';
+let model = null, tf = null;
+let running = false, stopReq = false;
+let wakeLock = null;
+const cards = new Map();  // id -> element karty
+const bgCache = {};
+const maskCanvasCache = new Map();
+
+const $ = id => document.getElementById(id);
+
+// ===================== BAZA (IndexedDB) =====================
+function openDB() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('foto-db', 1);
+    r.onupgradeneeded = () => {
+      r.result.createObjectStore('photos', { keyPath: 'id' });
+      r.result.createObjectStore('meta');
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+let dbp = null;
+const db = () => (dbp ||= openDB());
+async function dbTx(store, mode, fn) {
+  const d = await db();
+  return new Promise((res, rej) => {
+    const tx = d.transaction(store, mode);
+    const out = fn(tx.objectStore(store));
+    tx.oncomplete = () => res(out && out.result);
+    tx.onerror = () => rej(tx.error);
+    tx.onabort = () => rej(tx.error);
+  });
+}
+const dbPut = (store, val, key) => dbTx(store, 'readwrite', s => key === undefined ? s.put(val) : s.put(val, key));
+const dbAll = store => dbTx(store, 'readonly', s => s.getAll());
+const dbGet = (store, key) => dbTx(store, 'readonly', s => s.get(key));
+const dbClear = store => dbTx(store, 'readwrite', s => s.clear());
+const savePhoto = p => dbPut('photos', p);
+
+// ===================== NARZĘDZIA =====================
+const mk = (w, h) => { const c = document.createElement('canvas'); c.width = Math.max(1, w); c.height = Math.max(1, h); return c; };
+const rnd = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a;
+const rndF = (a, b) => a + Math.random() * (b - a);
+const effBg = p => p.bg || defaultBg;
+
+function detectBars(ctx, width, height) {
+  const data = ctx.getImageData(0, 0, width, height).data;
+  const isBlack = y => {
+    let dark = 0; const s = y * width * 4;
+    for (let x = 0; x < width; x++) {
+      const i = s + x * 4;
+      if (data[i] <= DARK_THRESHOLD && data[i+1] <= DARK_THRESHOLD && data[i+2] <= DARK_THRESHOLD) dark++;
+    }
+    return dark / width >= ROW_BLACK_RATIO;
+  };
+  let top = 0; while (top < height && isBlack(top)) top++;
+  let bottom = 0; while (bottom < height - top && isBlack(height - 1 - bottom)) bottom++;
+  return { top, bottom };
+}
+
+async function getBg(name) {
+  if (!bgCache[name]) {
+    bgCache[name] = fetch(BG_DIR + name + '.jpg')
+      .then(r => { if (!r.ok) throw new Error('Brak pliku ' + BG_DIR + name + '.jpg w repozytorium'); return r.blob(); })
+      .then(b => createImageBitmap(b))
+      .catch(e => { delete bgCache[name]; throw e; });
+  }
+  return bgCache[name];
+}
+
+// maska 512×512 → płótno z białym kolorem i alfą = maska
+function maskCanvas(p) {
+  let c = maskCanvasCache.get(p.id);
+  if (c && c._v === p.maskV) return c;
+  c = mk(MODEL_SIZE, MODEL_SIZE);
+  const ctx = c.getContext('2d');
+  const id = ctx.createImageData(MODEL_SIZE, MODEL_SIZE);
+  for (let i = 0; i < p.mask.length; i++) {
+    id.data[i*4] = id.data[i*4+1] = id.data[i*4+2] = 255;
+    id.data[i*4+3] = p.mask[i];
+  }
+  ctx.putImageData(id, 0, 0);
+  c._v = p.maskV;
+  maskCanvasCache.set(p.id, c);
+  return c;
+}
+
+const EDGE_LUT = (() => {
+  const l = new Uint8ClampedArray(256);
+  for (let a = 0; a < 256; a++) l[a] = Math.max(0, Math.min(255, ((a - EDGE_LO) / (EDGE_HI - EDGE_LO)) * 255));
+  return l;
+})();
+function sharpenAlpha(canvas) {
+  const ctx = canvas.getContext('2d');
+  const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = id.data;
+  for (let i = 3; i < d.length; i += 4) d[i] = EDGE_LUT[d[i]];
+  ctx.putImageData(id, 0, 0);
+}
+
+// ===================== RENDER JEDNEGO ZDJĘCIA =====================
+// Zwraca płótno o szerokości outW: paski + (produkt na tle albo oryginał)
+async function renderPhoto(p, outW, { showMask = false } = {}) {
+  const k = Math.min(1, outW / p.w);
+  const contentH0 = p.h - p.top - p.bottom;
+  const cw = Math.round(p.w * k), ch = Math.round(contentH0 * k);
+  const bt = Math.round(p.randTop * k), bb = Math.round(p.randBottom * k);
+
+  const out = mk(cw, bt + ch + bb);
+  const o = out.getContext('2d');
+  o.fillStyle = '#000'; o.fillRect(0, 0, out.width, out.height);
+
+  const bmp = k < 0.6
+    ? await createImageBitmap(p.blob, { resizeWidth: cw, resizeQuality: 'medium' })
+    : await createImageBitmap(p.blob);
+  const sc = bmp.width / p.w;
+  const content = mk(cw, ch);
+  const c = content.getContext('2d');
+  c.imageSmoothingQuality = 'high';
+  c.drawImage(bmp, 0, p.top * sc, bmp.width, contentH0 * sc, 0, 0, cw, ch);
+  bmp.close();
+
+  let layer = content;
+  const useBg = p.status === 'done' && p.mask && !p.keepOriginal;
+  if (useBg) {
+    const m = mk(cw, ch);
+    const mc = m.getContext('2d');
+    mc.imageSmoothingQuality = 'high';
+    mc.drawImage(maskCanvas(p), 0, 0, cw, ch);
+    sharpenAlpha(m);
+
+    layer = mk(cw, ch);
+    const lc = layer.getContext('2d');
+    if (showMask) {
+      lc.fillStyle = '#000'; lc.fillRect(0, 0, cw, ch);
+      lc.drawImage(m, 0, 0);
+    } else {
+      const bgImg = await getBg(effBg(p));
+      const prod = mk(cw, ch);
+      const pc = prod.getContext('2d');
+      pc.drawImage(content, 0, 0);
+      pc.globalCompositeOperation = 'destination-in';
+      pc.drawImage(m, 0, 0);
+
+      const s = Math.max(cw / bgImg.width, ch / bgImg.height) * BG_MARGIN;
+      const dw = bgImg.width * s, dh = bgImg.height * s;
+      lc.imageSmoothingQuality = 'high';
+      lc.drawImage(bgImg, -(dw - cw) * p.fx, -(dh - ch) * p.fy, dw, dh);
+      lc.drawImage(prod, 0, 0);
+    }
+  }
+  o.drawImage(layer, 0, bt);
+  return out;
+}
+
+// ===================== MODEL =====================
+const half2float = h => {
+  const s = (h & 0x8000) ? -1 : 1, e = (h >> 10) & 0x1f, f = h & 0x3ff;
+  if (e === 0) return s * Math.pow(2, -14) * (f / 1024);
+  if (e === 31) return f ? NaN : s * Infinity;
+  return s * Math.pow(2, e - 15) * (1 + f / 1024);
+};
+
+async function ensureModel() {
+  if (model) return;
+  $('runInfo').textContent = 'Ładuję model (za pierwszym razem pobiera ok. 100 MB)…';
+  tf = await import(TF_URL);
+  let lastErr = null;
+  for (const device of ['wasm', 'cpu']) {
+    try {
+      model = await tf.AutoModel.from_pretrained(MODEL_ID, {
+        device, dtype: 'fp16',
+        progress_callback: pr => {
+          if (pr && pr.status === 'progress' && pr.progress != null)
+            $('runInfo').textContent = `Pobieram model: ${Math.round(pr.progress)}%`;
+        }
+      });
+      return;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
+}
+
+async function inferMask(squareCanvas) {
+  const N = MODEL_SIZE * MODEL_SIZE;
+  const px = squareCanvas.getContext('2d').getImageData(0, 0, MODEL_SIZE, MODEL_SIZE).data;
+  const mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225];
+  const f = new Float32Array(3 * N);
+  for (let i = 0; i < N; i++) {
+    f[i]       = (px[i*4]   / 255 - mean[0]) / std[0];
+    f[N + i]   = (px[i*4+1] / 255 - mean[1]) / std[1];
+    f[2*N + i] = (px[i*4+2] / 255 - mean[2]) / std[2];
+  }
+  const input = new tf.Tensor('float32', f, [1, 3, MODEL_SIZE, MODEL_SIZE]);
+
+  let out = null, lastErr = null;
+  for (const name of ['input_image', 'pixel_values', 'input']) {
+    try { out = await model({ [name]: input }); break; } catch (e) { lastErr = e; }
+  }
+  if (!out) throw lastErr;
+
+  // wybieramy wyjście o rozmiarze 512×512
+  let t = null;
+  for (const v of Object.values(out)) {
+    const n = (v.dims || []).reduce((a, b) => a * b, 1);
+    if (n === N) { t = v; }
+  }
+  if (!t) t = out.logits || out.output_image || Object.values(out)[0];
+
+  let data = typeof t.getData === 'function' ? await t.getData() : (t.ort_tensor?.getData ? await t.ort_tensor.getData() : t.data);
+  let arr;
+  if (t.type === 'float16' || data instanceof Uint16Array) {
+    arr = new Float32Array(data.length);
+    for (let i = 0; i < data.length; i++) arr[i] = half2float(data[i]);
+  } else arr = data;
+
+  let min = Infinity, max = -Infinity;
+  for (let i = 0; i < N; i++) { const v = arr[i]; if (v < min) min = v; if (v > max) max = v; }
+  const already01 = min >= 0 && max <= 1;
+  const mask = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    const a = already01 ? arr[i] : 1 / (1 + Math.exp(-arr[i]));
+    mask[i] = Math.max(0, Math.min(255, Math.round(a * 255)));
+  }
+  return mask;
+}
+
+async function processPhoto(p) {
+  const bmp = await createImageBitmap(p.blob);
+  const ch = p.h - p.top - p.bottom;
+  const sq = mk(MODEL_SIZE, MODEL_SIZE);
+  const sc = sq.getContext('2d');
+  sc.imageSmoothingQuality = 'high';
+  sc.drawImage(bmp, 0, p.top, p.w, ch, 0, 0, MODEL_SIZE, MODEL_SIZE);
+  bmp.close();
+
+  const mask = await inferMask(sq);
+  let fg = 0, semi = 0;
+  for (let i = 0; i < mask.length; i++) { if (mask[i] > 200) fg++; else if (mask[i] > 30) semi++; }
+  fg /= mask.length; semi /= mask.length;
+
+  p.mask = mask; p.maskV = (p.maskV || 0) + 1;
+  p.status = 'done'; p.err = null;
+  p.flag = fg < 0.03 ? 'mało produktu' : fg > 0.9 ? 'zbliżenie?' : semi > 0.12 ? 'niepewne' : null;
+  p.stats = { fg: Math.round(fg * 100), semi: Math.round(semi * 100) };
+}
+
+// ===================== PĘTLA WYCINANIA =====================
+async function acquireWake() {
+  try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+function releaseWake() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
+
+function updateProgress() {
+  const total = photos.length;
+  const done = photos.filter(p => p.status === 'done').length;
+  const err = photos.filter(p => p.status === 'error').length;
+  $('progBar').style.width = total ? (done / total * 100) + '%' : '0';
+  if (!running) {
+    $('runInfo').innerHTML = total
+      ? `Gotowe: <b>${done}</b> z ${total}` + (err ? ` · błędy: <b class="error">${err}</b>` : '') +
+        (done < total ? ' — kliknij Start, żeby kontynuować.' : ' — wszystko wycięte.')
+      : 'Brak zdjęć.';
+  }
+  $('runBtn').disabled = total === 0 || (done === total && !running);
+  $('clearBtn').disabled = total === 0 || running;
+  updateExportUI();
+}
+
+async function runAll() {
+  if (running) { stopReq = true; $('runBtn').textContent = 'Zatrzymuję po tym zdjęciu…'; return; }
+  running = true; stopReq = false;
+  $('runBtn').textContent = 'Pauza';
+  $('clearBtn').disabled = true;
+  await acquireWake();
+  try {
+    await ensureModel();
+    const todo = photos.filter(p => p.status !== 'done');
+    let n = 0;
+    for (const p of todo) {
+      if (stopReq) break;
+      n++;
+      $('runInfo').textContent = `Wycinam ${n} z ${todo.length}: ${p.name}`;
+      const t0 = performance.now();
+      try { await processPhoto(p); }
+      catch (e) { p.status = 'error'; p.err = e.message || String(e); }
+      await savePhoto(p);
+      refreshCard(p);
+      $('progBar').style.width = (photos.filter(x => x.status === 'done').length / photos.length * 100) + '%';
+      $('runInfo').textContent += ` (${((performance.now() - t0) / 1000).toFixed(1)} s)`;
+    }
+  } catch (e) {
+    model = null;
+    $('runInfo').innerHTML = `<span class="error">Błąd modelu: ${e.message || e}. Odśwież stronę i spróbuj ponownie.</span>`;
+  }
+  running = false; stopReq = false;
+  releaseWake();
+  $('runBtn').textContent = 'Start wycinania';
+  const keep = $('runInfo').innerHTML;
+  updateProgress();
+  if (keep.includes('Błąd modelu')) $('runInfo').innerHTML = keep;
+}
+
+// ===================== IMPORT =====================
+$('fileInput').addEventListener('change', async e => {
+  const files = [...e.target.files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  e.target.value = '';
+  if (!files.length) return;
+  let added = 0, skipped = 0, noBars = 0;
+  for (const f of files) {
+    $('importInfo').textContent = `Wczytuję ${added + skipped + 1} z ${files.length}…`;
+    try {
+      const buf = await f.arrayBuffer();           // kopia w pamięci (stabilniejsze na telefonie)
+      const blob = new Blob([buf], { type: f.type });
+      const bmp = await createImageBitmap(blob);
+      const c = mk(bmp.width, bmp.height);
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(bmp, 0, 0);
+      let { top, bottom } = detectBars(ctx, c.width, c.height);
+      if (top + bottom >= c.height) { top = 0; bottom = 0; }
+      if (top + bottom === 0) noBars++;
+      const p = {
+        id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
+        name: f.name, type: f.type === 'image/png' ? 'image/png' : 'image/jpeg',
+        blob, w: bmp.width, h: bmp.height, top, bottom,
+        status: 'new', mask: null, maskV: 0, flag: null,
+        bg: null, keepOriginal: false,
+        fx: rndF(SHIFT_MIN, SHIFT_MAX), fy: rndF(SHIFT_MIN, SHIFT_MAX),
+        randTop: rnd(BAR_MIN, BAR_MAX), randBottom: rnd(BAR_MIN, BAR_MAX),
+        order: Date.now() + added
+      };
+      bmp.close();
+      photos.push(p);
+      await savePhoto(p);
+      addCard(p);
+      added++;
+    } catch (err) { skipped++; }
+  }
+  $('importInfo').innerHTML = `Dodano: <b>${added}</b>` + (skipped ? ` · pominięto (błąd pliku): <b class="error">${skipped}</b>` : '') +
+    (noBars ? ` · bez wykrytych pasów: <b>${noBars}</b> (sprawdź w podglądzie)` : '');
+  updateProgress();
+});
+
+// ===================== SIATKA MINIATUR =====================
+let renderChain = Promise.resolve();
+function addCard(p) {
+  const el = document.createElement('div');
+  el.className = 'thumb';
+  el.innerHTML = '<span class="tag"></span><span class="num"></span>';
+  el.addEventListener('click', () => openViewer(photos.indexOf(p)));
+  $('grid').appendChild(el);
+  cards.set(p.id, el);
+  refreshCard(p);
+}
+function refreshCard(p) {
+  const el = cards.get(p.id);
+  if (!el) return;
+  const idx = photos.indexOf(p) + 1;
+  el.querySelector('.num').textContent = idx;
+  const tag = el.querySelector('.tag');
+  if (p.status === 'error') { tag.className = 'tag err'; tag.textContent = 'błąd'; tag.title = p.err || ''; }
+  else if (p.status !== 'done') { tag.className = 'tag'; tag.textContent = 'czeka'; }
+  else if (p.flag) { tag.className = 'tag warn'; tag.textContent = '⚠ ' + p.flag; }
+  else if (p.keepOriginal) { tag.className = 'tag'; tag.textContent = 'oryginał'; }
+  else { tag.className = 'tag ok'; tag.textContent = '✓'; }
+  renderChain = renderChain.then(async () => {
+    try {
+      const c = await renderPhoto(p, THUMB_W);
+      const old = el.querySelector('canvas');
+      if (old) old.remove();
+      el.insertBefore(c, el.firstChild);
+    } catch (e) {
+      tag.className = 'tag err'; tag.textContent = 'tło?'; tag.title = e.message;
+    }
+  });
+}
+function refreshAllCards() { photos.forEach(refreshCard); }
+
+// ===================== WYBÓR TŁA DOMYŚLNEGO =====================
+function buildStrip(container, selectedFn, onPick, withOriginal) {
+  container.innerHTML = '';
+  const items = BGS.map(([id, label]) => ({ id, label }));
+  if (withOriginal) items.unshift({ id: '__orig', label: 'Oryginał' });
+  for (const it of items) {
+    const d = document.createElement('div');
+    d.className = 'bgitem' + (it.id === '__orig' ? ' orig' : '') + (selectedFn(it.id) ? ' sel' : '');
+    d.innerHTML = `<div style="${it.id === '__orig' ? '' : `background-image:url('${BG_DIR}${it.id}.jpg')`}"></div>${it.label}`;
+    d.addEventListener('click', () => onPick(it.id));
+    container.appendChild(d);
+  }
+}
+function buildDefaultStrip() {
+  buildStrip($('defaultStrip'), id => id === defaultBg, async id => {
+    defaultBg = id;
+    await dbPut('meta', id, 'defaultBg');
+    buildDefaultStrip();
+    photos.filter(p => !p.bg).forEach(refreshCard);
+  }, false);
+}
+
+// ===================== PODGLĄD POJEDYNCZEGO ZDJĘCIA =====================
+let vIdx = -1, vShowMask = false, vBusy = false, vPending = false;
+
+function openViewer(i) {
+  if (i < 0 || i >= photos.length) return;
+  vIdx = i; vShowMask = false;
+  $('viewer').classList.add('open');
+  document.body.style.overflow = 'hidden';
+  $('viewer').scrollTop = 0;
+  syncViewer();
+}
+function closeViewer() {
+  $('viewer').classList.remove('open');
+  document.body.style.overflow = '';
+  vIdx = -1;
+}
+function syncViewer() {
+  const p = photos[vIdx];
+  $('vTitle').textContent = `${vIdx + 1} / ${photos.length} — ${p.name}`;
+  $('vTop').value = p.top; $('vBottom').value = p.bottom;
+  $('fxRange').value = Math.round(p.fx * 100);
+  $('fyRange').value = Math.round(p.fy * 100);
+  $('vMask').textContent = vShowMask ? 'Ukryj maskę' : 'Pokaż maskę (biały = produkt)';
+  buildStrip($('viewerStrip'),
+    id => p.keepOriginal ? id === '__orig' : (p.bg ? id === p.bg : false),
+    async id => {
+      if (id === '__orig') { p.keepOriginal = true; }
+      else { p.keepOriginal = false; p.bg = id; }
+      await savePhoto(p); syncViewer(); refreshCard(p);
+    }, true);
+  drawViewer();
+}
+async function drawViewer() {
+  if (vBusy) { vPending = true; return; }
+  vBusy = true;
+  const p = photos[vIdx];
+  try {
+    const wanted = Math.min(p.w, Math.round(Math.min(window.innerWidth * (window.devicePixelRatio || 1), 900)));
+    const c = await renderPhoto(p, wanted, { showMask: vShowMask });
+    const v = $('vcanvas');
+    v.width = c.width; v.height = c.height;
+    v.getContext('2d').drawImage(c, 0, 0);
+    const bgName = p.keepOriginal ? 'oryginalne tło' : (p.bg ? `tło: ${p.bg}` : `tło domyślne: ${defaultBg}`);
+    $('vInfo').innerHTML =
+      `Oryginał ${p.w}×${p.h} px · pasy w oryginale: góra ${p.top}, dół ${p.bottom} · nowe paski: góra ${p.randTop}, dół ${p.randBottom}<br>` +
+      (p.status === 'done' ? `${bgName}` + (p.stats ? ` · produkt ${p.stats.fg}% obrazu, niepewne ${p.stats.semi}%` : '') + (p.flag ? ` · <b style="color:var(--warn)">⚠ ${p.flag}</b>` : '')
+        : p.status === 'error' ? `<span class="error">Błąd: ${p.err}</span>` : 'Zdjęcie jeszcze nie wycięte — kliknij Start na stronie głównej.');
+  } catch (e) {
+    $('vInfo').innerHTML = `<span class="error">${e.message}</span>`;
+  }
+  vBusy = false;
+  if (vPending) { vPending = false; drawViewer(); }
+}
+let saveTimer = null;
+function onSlide() {
+  const p = photos[vIdx];
+  p.fx = $('fxRange').value / 100; p.fy = $('fyRange').value / 100;
+  drawViewer();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => { savePhoto(p); refreshCard(p); }, 400);
+}
+$('fxRange').addEventListener('input', onSlide);
+$('fyRange').addEventListener('input', onSlide);
+$('vPrev').addEventListener('click', () => { if (vIdx > 0) { vIdx--; vShowMask = false; syncViewer(); $('viewer').scrollTop = 0; } });
+$('vNext').addEventListener('click', () => { if (vIdx < photos.length - 1) { vIdx++; vShowMask = false; syncViewer(); $('viewer').scrollTop = 0; } });
+$('vClose').addEventListener('click', closeViewer);
+$('vMask').addEventListener('click', () => { vShowMask = !vShowMask; syncViewer(); });
+$('vReroll').addEventListener('click', async () => {
+  const p = photos[vIdx];
+  p.randTop = rnd(BAR_MIN, BAR_MAX); p.randBottom = rnd(BAR_MIN, BAR_MAX);
+  await savePhoto(p); drawViewer(); refreshCard(p);
+});
+$('vBars').addEventListener('click', async () => {
+  const p = photos[vIdx];
+  const top = parseInt($('vTop').value, 10), bottom = parseInt($('vBottom').value, 10);
+  if (isNaN(top) || isNaN(bottom) || top < 0 || bottom < 0 || top + bottom >= p.h) {
+    $('vInfo').innerHTML = '<span class="error">Wpisz poprawne liczby (pasy muszą być niższe niż całe zdjęcie).</span>'; return;
+  }
+  p.top = top; p.bottom = bottom;
+  p.status = 'new'; p.mask = null; p.flag = null; p.stats = null; p.maskV++;
+  await savePhoto(p); syncViewer(); refreshCard(p); updateProgress();
+});
+$('vApplyAll').addEventListener('click', async () => {
+  const p = photos[vIdx];
+  if (p.keepOriginal || !p.bg) { $('vInfo').textContent = 'Najpierw wybierz tło dla tego zdjęcia.'; return; }
+  if (!confirm('Ustawić to tło dla wszystkich zdjęć? Ręczne wybory tła na innych zdjęciach zostaną zastąpione (zdjęcia „oryginał” zostają).')) return;
+  defaultBg = p.bg;
+  await dbPut('meta', defaultBg, 'defaultBg');
+  for (const q of photos) { if (!q.keepOriginal) { q.bg = null; await savePhoto(q); } }
+  buildDefaultStrip(); syncViewer(); refreshAllCards();
+});
+
+// ===================== EKSPORT ZIP =====================
+function updateExportUI() {
+  const done = photos.filter(p => p.status === 'done');
+  const box = $('exportParts');
+  box.innerHTML = '';
+  if (!done.length) { $('exportInfo').textContent = 'Eksport jest dostępny po wycięciu zdjęć.'; return; }
+  $('exportInfo').innerHTML = `Gotowych do eksportu: <b>${done.length}</b> z ${photos.length}. ` +
+    `ZIP-y są po ${ZIP_PART} zdjęć, żeby nie przepełnić pamięci telefonu. Zdjęcia mają oryginalne nazwy i rozdzielczość.`;
+  for (let i = 0; i < done.length; i += ZIP_PART) {
+    const part = done.slice(i, i + ZIP_PART);
+    const b = document.createElement('button');
+    b.textContent = `Pobierz ZIP: zdjęcia ${i + 1}–${i + part.length}`;
+    b.addEventListener('click', () => exportZip(part, i / ZIP_PART + 1, b));
+    box.appendChild(b);
+  }
+}
+async function exportZip(part, no, btn) {
+  if (typeof JSZip === 'undefined') { $('exportInfo').innerHTML = '<span class="error">Nie wczytała się biblioteka JSZip (sprawdź internet i odśwież).</span>'; return; }
+  const label = btn.textContent;
+  [...document.querySelectorAll('#exportParts button')].forEach(x => x.disabled = true);
+  try {
+    const zip = new JSZip();
+    for (let i = 0; i < part.length; i++) {
+      const p = part[i];
+      btn.textContent = `Przygotowuję ${i + 1} z ${part.length}…`;
+      const c = await renderPhoto(p, p.w);
+      const blob = await new Promise(res => c.toBlob(res, p.type, JPG_QUALITY));
+      zip.file(p.name, blob);
+      c.width = c.height = 1;
+    }
+    btn.textContent = 'Pakuję ZIP…';
+    const zblob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(zblob);
+    a.download = `foto_czesc_${no}.zip`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  } catch (e) {
+    $('exportInfo').innerHTML = `<span class="error">Błąd eksportu: ${e.message}</span>`;
+  }
+  btn.textContent = label;
+  [...document.querySelectorAll('#exportParts button')].forEach(x => x.disabled = false);
+}
+
+$('clearBtn').addEventListener('click', async () => {
+  if (!confirm('Usunąć wszystkie zdjęcia i maski z telefonu? Oryginały na telefonie zostają nietknięte.')) return;
+  await dbClear('photos');
+  photos = []; cards.clear(); maskCanvasCache.clear();
+  $('grid').innerHTML = '';
+  $('importInfo').textContent = 'Paczka usunięta.';
+  updateProgress();
+});
+$('runBtn').addEventListener('click', runAll);
+
+// ===================== START =====================
+(async () => {
+  try {
+    const saved = await dbGet('meta', 'defaultBg');
+    if (saved) defaultBg = saved;
+    photos = (await dbAll('photos')).sort((a, b) => a.order - b.order);
+    // zdjęcia z przerwanego przetwarzania wracają do kolejki
+    photos.forEach(p => { if (p.status !== 'done') p.status = p.status === 'error' ? 'error' : 'new'; });
+  } catch (e) {
+    $('importInfo').innerHTML = `<span class="error">Nie mogę odczytać pamięci przeglądarki: ${e.message}</span>`;
+  }
+  buildDefaultStrip();
+  photos.forEach(addCard);
+  updateProgress();
+  if (photos.length) $('importInfo').textContent = `Wczytano z pamięci telefonu: ${photos.length} zdjęć.`;
+})();
+</script>
+</body>
+</html>
